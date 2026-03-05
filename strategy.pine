@@ -1,73 +1,107 @@
 //@version=5
-strategy("SCALP MVP BOT (Futures + SL/TP)", overlay=true, pyramiding=0, calc_on_every_tick=false, commission_type=strategy.commission.percent, commission_value=0.04, slippage=1)
+strategy("Macketings Scalp Bot", overlay=true, pyramiding=0,
+  calc_on_every_tick=false,
+  commission_type=strategy.commission.percent, commission_value=0.04,
+  slippage=1, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
 
-//====================
-// Inputs
-//====================
-groupSig  = "Signals"
-groupRisk = "Risk Management"
-groupExec = "Execution"
+//─── Inputs ───────────────────────────────────────────
+groupTrend = "Trend"
+groupRisk  = "Risk Management"
+groupExec  = "Execution"
 
-emaFastLen   = input.int(9,  "EMA Fast",       group=groupSig)
-emaSlowLen   = input.int(21, "EMA Slow",       group=groupSig)
-rsiLen       = input.int(14, "RSI Len",        group=groupSig)
-rsiLongMin   = input.int(52, "RSI long min",   group=groupSig)
-rsiShortMax  = input.int(48, "RSI short max",  group=groupSig)
+ema1Len     = input.int(80,    "EMA Fast 1",            group=groupTrend)
+ema2Len     = input.int(85,    "EMA Fast 2",            group=groupTrend)
+ema3Len     = input.int(340,   "EMA Slow 1",            group=groupTrend)
+ema4Len     = input.int(500,   "EMA Slow 2",            group=groupTrend)
+smaLen      = input.int(325,   "SMA Safety",            group=groupTrend)
 
-slPercent    = input.float(1.0, "Stop Loss %",   minval=0.1, step=0.1, group=groupRisk)
-tpPercent    = input.float(1.5, "Take Profit %", minval=0.1, step=0.1, group=groupRisk)
+slPercent   = input.float(0.2, "Stop Loss %",           minval=0.05, step=0.05, group=groupRisk)
+tpPercent   = input.float(2.5, "Take Profit %",         minval=0.1,  step=0.1,  group=groupRisk)
+bandExitPct = input.float(1.5, "Band Exit Min Profit %", minval=0.1, step=0.1,  group=groupRisk)
 
-cooldownBars = input.int(3, "Cooldown bars", minval=0, group=groupExec)
+cooldownBars = input.int(100,  "Cooldown Bars",         minval=0,    group=groupExec)
+useSession   = input.bool(false, "Session Filter",      group=groupExec)
+sessionTime  = input.session("0900-2359", "Session",    group=groupExec)
 
-//====================
-// Indicators
-//====================
-emaFast = ta.ema(close, emaFastLen)
-emaSlow = ta.ema(close, emaSlowLen)
-vwapVal = ta.vwap(hlc3)
-rsiVal  = ta.rsi(close, rsiLen)
+//─── Indicators ───────────────────────────────────────
+ema1 = ta.ema(close, ema1Len)
+ema2 = ta.ema(close, ema2Len)
+ema3 = ta.ema(close, ema3Len)
+ema4 = ta.ema(close, ema4Len)
+sma  = ta.sma(close, smaLen)
 
-//====================
-// Signals
-//====================
-longSignal  = ta.crossover(emaFast, emaSlow)  and close > vwapVal and rsiVal >= rsiLongMin
-shortSignal = ta.crossunder(emaFast, emaSlow) and close < vwapVal and rsiVal <= rsiShortMax
+//─── Trend Alignment ─────────────────────────────────
+trendUp = ema1 > ema2 and ema1 > ema3 and ema3 > ema4
+trendDn = ema1 < ema2 and ema1 < ema3 and ema3 < ema4
 
-//====================
-// Cooldown
-//====================
-var int lastSignalBar = na
-canSignal = na(lastSignalBar) or (bar_index - lastSignalBar >= cooldownBars)
+//─── Safety Filter (SMA 325) ─────────────────────────
+safeLong  = close > sma
+safeShort = close < sma
 
-//====================
-// JSON Payload Builder
-//====================
+//─── Retest Detection ────────────────────────────────
+retestLong  = low <= ema2 and close > ema1
+retestShort = high >= ema1 and close < ema2
+
+//─── Cooldown ────────────────────────────────────────
+var int lastExitBar = 0
+if strategy.position_size[1] != 0 and strategy.position_size == 0
+    lastExitBar := bar_index
+canTrade = bar_index - lastExitBar >= cooldownBars
+
+//─── Session Filter ──────────────────────────────────
+inSession = useSession ? not na(time(timeframe.period, sessionTime)) : true
+
+//─── JSON Payload Builder ────────────────────────────
 makePayload(_action, _sl, _tp) =>
     sym = syminfo.basecurrency + "USDT"
-    '{"strategy":"scalp-mvp","symbol":"' + sym + '","action":"' + _action + '","price":' + str.tostring(close) + ',"sl":' + str.tostring(_sl) + ',"tp":' + str.tostring(_tp) + ',"time":' + str.tostring(time) + '}'
+    '{"strategy":"macketings-scalp","symbol":"' + sym + '","action":"' + _action + '","price":' + str.tostring(close) + ',"sl":' + str.tostring(_sl) + ',"tp":' + str.tostring(_tp) + ',"time":' + str.tostring(time) + '}'
 
-//====================
-// Entries + SL/TP + Alerts
-//====================
-if barstate.isconfirmed and canSignal and longSignal
-    slPrice = close * (1 - slPercent / 100)
-    tpPrice = close * (1 + tpPercent / 100)
+//─── Entry Logic ─────────────────────────────────────
+longCond  = barstate.isconfirmed and canTrade and inSession and trendUp and safeLong  and retestLong
+shortCond = barstate.isconfirmed and canTrade and inSession and trendDn and safeShort and retestShort
+
+if longCond
+    sl = close * (1 - slPercent / 100)
+    tp = close * (1 + tpPercent / 100)
     strategy.entry("L", strategy.long)
-    strategy.exit("L_Exit", "L", stop=slPrice, limit=tpPrice)
-    lastSignalBar := bar_index
-    alert(makePayload("LONG", slPrice, tpPrice), alert.freq_once_per_bar_close)
+    strategy.exit("L_Exit", "L", stop=sl, limit=tp)
+    alert(makePayload("LONG", sl, tp), alert.freq_once_per_bar_close)
 
-if barstate.isconfirmed and canSignal and shortSignal
-    slPrice = close * (1 + slPercent / 100)
-    tpPrice = close * (1 - tpPercent / 100)
+if shortCond
+    sl = close * (1 + slPercent / 100)
+    tp = close * (1 - tpPercent / 100)
     strategy.entry("S", strategy.short)
-    strategy.exit("S_Exit", "S", stop=slPrice, limit=tpPrice)
-    lastSignalBar := bar_index
-    alert(makePayload("SHORT", slPrice, tpPrice), alert.freq_once_per_bar_close)
+    strategy.exit("S_Exit", "S", stop=sl, limit=tp)
+    alert(makePayload("SHORT", sl, tp), alert.freq_once_per_bar_close)
 
-//====================
-// Plots
-//====================
-plot(emaFast, title="EMA Fast",  color=color.blue)
-plot(emaSlow, title="EMA Slow",  color=color.orange)
-plot(vwapVal, title="VWAP",      color=color.purple)
+//─── Smart Band Exit ─────────────────────────────────
+if strategy.position_size > 0
+    pctProfit = (close - strategy.position_avg_price) / strategy.position_avg_price * 100
+    if pctProfit >= bandExitPct and close < ema2
+        strategy.close("L", comment="Band Exit")
+        alert(makePayload("CLOSE_LONG", 0, 0), alert.freq_once_per_bar_close)
+
+if strategy.position_size < 0
+    pctProfit = (strategy.position_avg_price - close) / strategy.position_avg_price * 100
+    if pctProfit >= bandExitPct and close > ema1
+        strategy.close("S", comment="Band Exit")
+        alert(makePayload("CLOSE_SHORT", 0, 0), alert.freq_once_per_bar_close)
+
+//─── Trend Reversal Exit (EMA 340/500 Cross) ─────────
+if strategy.position_size > 0 and ta.crossunder(ema3, ema4)
+    strategy.close("L", comment="Trend Rev")
+    alert(makePayload("CLOSE_LONG", 0, 0), alert.freq_once_per_bar_close)
+
+if strategy.position_size < 0 and ta.crossover(ema3, ema4)
+    strategy.close("S", comment="Trend Rev")
+    alert(makePayload("CLOSE_SHORT", 0, 0), alert.freq_once_per_bar_close)
+
+//─── Plots ────────────────────────────────────────────
+p1 = plot(ema1, "EMA 80",  color=color.blue)
+p2 = plot(ema2, "EMA 85",  color=color.aqua)
+plot(ema3, "EMA 340", color=color.orange)
+plot(ema4, "EMA 500", color=color.red)
+plot(sma,  "SMA 325", color=color.gray, style=plot.style_circles)
+
+fill(p1, p2, color=trendUp ? color.new(color.blue, 85) : trendDn ? color.new(color.red, 85) : color.new(color.gray, 92))
+bgcolor(not canTrade or not inSession ? color.new(color.gray, 93) : na, title="No Trade Zone")

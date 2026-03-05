@@ -16,9 +16,12 @@ const PORT            = Number(process.env.PORT || 3000);
 const DEFAULT_SYMBOL  = String(process.env.SYMBOL || "BTCUSDT").toUpperCase();
 const QUOTE_PER_TRADE = Number(process.env.QUOTE_PER_TRADE || 50);
 const COOLDOWN_MS     = Number(process.env.COOLDOWN_SECONDS || 30) * 1000;
-const LEVERAGE        = Number(process.env.LEVERAGE || 5);
-const SL_PERCENT      = Number(process.env.SL_PERCENT || 1.0);
-const TP_PERCENT      = Number(process.env.TP_PERCENT || 1.5);
+const LEVERAGE          = Number(process.env.LEVERAGE || 5);
+const SL_PERCENT        = Number(process.env.SL_PERCENT || 0.2);
+const TP_PERCENT        = Number(process.env.TP_PERCENT || 2.5);
+const BREAKEVEN_TRIGGER = Number(process.env.BREAKEVEN_TRIGGER || 0.3);
+const BREAKEVEN_SECURE  = Number(process.env.BREAKEVEN_SECURE || 0.2);
+const MONITOR_MS        = Number(process.env.MONITOR_INTERVAL_MS || 2000);
 
 const API_KEY    = process.env.BINANCE_API_KEY;
 const API_SECRET = process.env.BINANCE_API_SECRET;
@@ -195,13 +198,38 @@ async function monitorSLTP() {
       const mark = await getMarkPrice(trade.symbol);
       const info = await getSymbolInfo(trade.symbol);
       const absAmt = Math.abs(posAmt);
+
+      /* ── Break-even trailing ── */
+      const profitPct = trade.action === "LONG"
+        ? ((mark - trade.entryPrice) / trade.entryPrice) * 100
+        : ((trade.entryPrice - mark) / trade.entryPrice) * 100;
+
+      let currentSlPrice = trade.slPrice;
+
+      if (profitPct >= BREAKEVEN_TRIGGER && !trade.breakevenApplied) {
+        const newSl = trade.action === "LONG"
+          ? trade.entryPrice * (1 + BREAKEVEN_SECURE / 100)
+          : trade.entryPrice * (1 - BREAKEVEN_SECURE / 100);
+        currentSlPrice = Number(roundPrice(newSl, info.pricePrecision));
+
+        const fresh = loadTrades();
+        const ft = fresh.find((t) => t.id === trade.id);
+        if (ft && ft.status === "OPEN") {
+          ft.slPrice = currentSlPrice;
+          ft.breakevenApplied = true;
+          saveTrades(fresh);
+          console.log(`BREAKEVEN: ${trade.action} ${trade.symbol} | SL -> ${currentSlPrice}`);
+        }
+      }
+
+      /* ── SL / TP check ── */
       let hit = null;
 
       if (trade.action === "LONG") {
-        if (trade.slPrice && mark <= trade.slPrice) hit = "SL";
+        if (currentSlPrice && mark <= currentSlPrice) hit = "SL";
         else if (trade.tpPrice && mark >= trade.tpPrice) hit = "TP";
       } else {
-        if (trade.slPrice && mark >= trade.slPrice) hit = "SL";
+        if (currentSlPrice && mark >= currentSlPrice) hit = "SL";
         else if (trade.tpPrice && mark <= trade.tpPrice) hit = "TP";
       }
 
@@ -219,7 +247,7 @@ async function monitorSLTP() {
   }
 }
 
-setInterval(monitorSLTP, 5_000);
+setInterval(monitorSLTP, MONITOR_MS);
 
 /* ───────────── Cooldown & dedup ───────────── */
 
@@ -442,8 +470,7 @@ app.post("/webhook", async (req, res) => {
       quantity:   filledQty,
       slPrice:    Number(slPrice),
       tpPrice:    Number(tpPrice),
-      slOrderId:  null,
-      tpOrderId:  null,
+      breakevenApplied: false,
       exitPrice:  null,
       exitTime:   null,
       exitReason: null,
@@ -472,7 +499,7 @@ app.post("/webhook", async (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`FUTURES BOT CALISIYOR -> PORT: ${PORT}`);
-  console.log(`Leverage: ${LEVERAGE}x | SL: ${SL_PERCENT}% | TP: ${TP_PERCENT}%`);
+  console.log(`Leverage: ${LEVERAGE}x | SL: ${SL_PERCENT}% | TP: ${TP_PERCENT}% | BE trigger: ${BREAKEVEN_TRIGGER}% -> secure: ${BREAKEVEN_SECURE}%`);
   console.log(`Dashboard: http://localhost:${PORT}/dashboard`);
   console.log(`Health:    http://localhost:${PORT}/health`);
 });

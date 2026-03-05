@@ -153,8 +153,35 @@
   .badge-open  { background: rgba(33,150,243,0.15); color: var(--blue); }
   .badge-sl    { background: rgba(239,83,80,0.15);  color: var(--red); }
   .badge-tp    { background: rgba(38,166,154,0.15); color: var(--green); }
+  .badge-trail { background: rgba(33,150,243,0.15);  color: var(--blue); }
   .badge-rev   { background: rgba(255,152,0,0.15);  color: var(--orange); }
   .badge-manual{ background: rgba(171,71,188,0.15); color: var(--purple); }
+
+  .status-row {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 24px;
+    flex-wrap: wrap;
+  }
+  .status-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 14px;
+    border-radius: 20px;
+    font-size: 12px;
+    font-weight: 600;
+    border: 1px solid var(--border);
+    background: var(--card);
+  }
+  .status-dot {
+    width: 7px; height: 7px;
+    border-radius: 50%;
+  }
+  .dot-green { background: var(--green); }
+  .dot-red   { background: var(--red); }
+  .dot-blue  { background: var(--blue); }
+  .dot-muted { background: var(--muted); }
 
   .no-data {
     text-align: center;
@@ -180,6 +207,14 @@
     <div class="live-dot"></div>
     <span class="subtitle" id="lastUpdate">--</span>
   </div>
+</div>
+
+<!-- Smart Status Row -->
+<div class="status-row" id="statusRow">
+  <div class="status-pill"><span class="status-dot dot-muted" id="ddDot"></span><span id="ddStatus">Drawdown Guard: --</span></div>
+  <div class="status-pill"><span class="status-dot dot-blue"></span><span id="sizeStatus">Pozisyon: 1.0x</span></div>
+  <div class="status-pill"><span class="status-dot dot-muted" id="atrDot"></span><span id="atrStatus">ATR: --</span></div>
+  <div class="status-pill"><span class="status-dot dot-muted" id="trailDot"></span><span id="trailStatus">Trail: pasif</span></div>
 </div>
 
 <!-- Stat Cards -->
@@ -271,8 +306,8 @@ function initCharts() {
   exitChart = new Chart(document.getElementById('exitChart'), {
     type: 'doughnut',
     data: {
-      labels: ['Take Profit', 'Stop Loss', 'Ters Sinyal', 'Manuel'],
-      datasets: [{ data: [0, 0, 0, 0], backgroundColor: ['#26a69a', '#ef5350', '#ff9800', '#ab47bc'], borderWidth: 0 }],
+      labels: ['Take Profit', 'Stop Loss', 'Trail', 'Ters Sinyal', 'Manuel'],
+      datasets: [{ data: [0, 0, 0, 0, 0], backgroundColor: ['#26a69a', '#ef5350', '#2196f3', '#ff9800', '#ab47bc'], borderWidth: 0 }],
     },
     options: {
       responsive: true,
@@ -301,7 +336,7 @@ function actionBadge(action) {
 
 function exitBadge(reason) {
   if (!reason) return '<span class="badge badge-open">ACIK</span>';
-  const map = { SL: 'badge-sl', TP: 'badge-tp', REVERSE: 'badge-rev', MANUAL: 'badge-manual', UNKNOWN: 'badge-manual' };
+  const map = { SL: 'badge-sl', TP: 'badge-tp', TRAIL: 'badge-trail', REVERSE: 'badge-rev', MANUAL: 'badge-manual', UNKNOWN: 'badge-manual' };
   return `<span class="badge ${map[reason] || 'badge-manual'}">${reason}</span>`;
 }
 
@@ -351,8 +386,44 @@ function updateDashboard(stats) {
   pnlChart.update('none');
 
   // Exit reasons
-  exitChart.data.datasets[0].data = [stats.tpHits, stats.slHits, stats.reverseCloses, stats.manualCloses];
+  exitChart.data.datasets[0].data = [stats.tpHits, stats.slHits, stats.trailHits || 0, stats.reverseCloses, stats.manualCloses];
   exitChart.update('none');
+
+  // Smart status row
+  const dd = stats.drawdownGuard || {};
+  const ddDot = document.getElementById('ddDot');
+  const ddEl  = document.getElementById('ddStatus');
+  if (dd.paused) {
+    ddDot.className = 'status-dot dot-red';
+    ddEl.textContent = 'Guard: DURDURULDU';
+    ddEl.style.color = 'var(--red)';
+  } else {
+    ddDot.className = 'status-dot dot-green';
+    ddEl.textContent = `Guard: aktif (${dd.consecutiveLosses || 0} kayip)`;
+    ddEl.style.color = '';
+  }
+
+  document.getElementById('sizeStatus').textContent = `Pozisyon: ${stats.sizeMult || 1}x`;
+
+  const atrEl  = document.getElementById('atrStatus');
+  const atrDot = document.getElementById('atrDot');
+  if (stats.lastATR) {
+    atrDot.className = 'status-dot dot-blue';
+    atrEl.textContent = `ATR: $${stats.lastATR}`;
+  } else {
+    atrDot.className = 'status-dot dot-muted';
+    atrEl.textContent = 'ATR: --';
+  }
+
+  const trailEl  = document.getElementById('trailStatus');
+  const trailDot = document.getElementById('trailDot');
+  if (stats.activeTrail && stats.activeTrail.trailingActive) {
+    trailDot.className = 'status-dot dot-green';
+    trailEl.textContent = `Trail: $${stats.activeTrail.trailStopPrice}`;
+  } else {
+    trailDot.className = 'status-dot dot-muted';
+    trailEl.textContent = 'Trail: pasif';
+  }
 
   // Table
   const rt = stats.recentTrades;

@@ -23,6 +23,26 @@ const BREAKEVEN_TRIGGER = Number(process.env.BREAKEVEN_TRIGGER || 0.3);
 const BREAKEVEN_SECURE  = Number(process.env.BREAKEVEN_SECURE || 0.2);
 const MONITOR_MS        = Number(process.env.MONITOR_INTERVAL_MS || 2000);
 
+/* ── ATR Dynamic SL/TP ── */
+const USE_ATR      = process.env.USE_ATR === "true";
+const ATR_PERIOD   = Number(process.env.ATR_PERIOD || 14);
+const ATR_SL_MULT  = Number(process.env.ATR_SL_MULT || 1.5);
+const ATR_TP_MULT  = Number(process.env.ATR_TP_MULT || 3.0);
+
+/* ── Trailing Take Profit ── */
+const TRAIL_ACTIVATE_PCT = Number(process.env.TRAIL_ACTIVATE_PCT || 1.0);
+const TRAIL_DISTANCE_PCT = Number(process.env.TRAIL_DISTANCE_PCT || 0.5);
+
+/* ── Drawdown Guard ── */
+const MAX_DAILY_LOSS_PCT     = Number(process.env.MAX_DAILY_LOSS_PCT || 3.0);
+const MAX_CONSECUTIVE_LOSSES = Number(process.env.MAX_CONSECUTIVE_LOSSES || 3);
+
+/* ── Adaptive Position Sizing ── */
+const ADAPTIVE_SIZING = process.env.ADAPTIVE_SIZING === "true";
+const SIZING_LOOKBACK = Number(process.env.SIZING_LOOKBACK || 20);
+const MIN_SIZE_MULT   = Number(process.env.MIN_SIZE_MULT || 0.5);
+const MAX_SIZE_MULT   = Number(process.env.MAX_SIZE_MULT || 2.0);
+
 const API_KEY    = process.env.BINANCE_API_KEY;
 const API_SECRET = process.env.BINANCE_API_SECRET;
 const BASE_URL   = "https://testnet.binancefuture.com";
@@ -86,6 +106,33 @@ async function getPosition(symbol) {
 async function getMarkPrice(symbol) {
   const resp = await api.get("/fapi/v1/premiumIndex", { params: { symbol } });
   return Number(resp.data.markPrice);
+}
+
+async function getATR(symbol, interval = "1m", period = ATR_PERIOD) {
+  const resp = await api.get("/fapi/v1/klines", {
+    params: { symbol, interval, limit: period + 1 },
+  });
+  const candles = resp.data;
+  if (candles.length < 2) return 0;
+
+  const trueRanges = [];
+  for (let i = 1; i < candles.length; i++) {
+    const high      = Number(candles[i][2]);
+    const low       = Number(candles[i][3]);
+    const prevClose = Number(candles[i - 1][4]);
+    const tr = Math.max(high - low, Math.abs(high - prevClose), Math.abs(low - prevClose));
+    trueRanges.push(tr);
+  }
+  return trueRanges.reduce((sum, tr) => sum + tr, 0) / trueRanges.length;
+}
+
+let lastATR = { value: 0, ts: 0 };
+
+async function getCachedATR(symbol) {
+  if (Date.now() - lastATR.ts < 60_000 && lastATR.value > 0) return lastATR.value;
+  const atr = await getATR(symbol);
+  lastATR = { value: atr, ts: Date.now() };
+  return atr;
 }
 
 async function setLeverage(symbol, leverage) {
@@ -179,6 +226,62 @@ function closeOpenTrade(symbol, exitReason, exitPrice) {
   console.log(`Trade closed: ${openTrade.action} ${symbol} | ${exitReason} | PnL: ${pnl.toFixed(4)} USDT`);
 }
 
+/* ───────────── Drawdown Guard ───────────── */
+
+function getDrawdownStatus() {
+  const trades = loadTrades();
+  const closed = trades.filter((t) => t.status === "CLOSED");
+  if (closed.length === 0) return { paused: false, reason: null, consecutiveLosses: 0, dailyPnl: 0 };
+
+  const recent = [...closed].reverse();
+  let consecutiveLosses = 0;
+  for (const t of recent) {
+    if ((t.pnl || 0) <= 0) consecutiveLosses++;
+    else break;
+  }
+
+  if (consecutiveLosses >= MAX_CONSECUTIVE_LOSSES) {
+    return { paused: true, reason: `${consecutiveLosses} art arda kayip`, consecutiveLosses, dailyPnl: 0 };
+  }
+
+  const dayAgo = Date.now() - 24 * 60 * 60 * 1000;
+  const dailyClosed = closed.filter((t) => (t.exitTime || 0) >= dayAgo);
+  const dailyPnl = dailyClosed.reduce((s, t) => s + (t.pnl || 0), 0);
+
+  if (dailyPnl < 0) {
+    const lossPct = (Math.abs(dailyPnl) / QUOTE_PER_TRADE) * 100;
+    if (lossPct >= MAX_DAILY_LOSS_PCT) {
+      return { paused: true, reason: `gunluk kayip ${lossPct.toFixed(1)}% >= ${MAX_DAILY_LOSS_PCT}%`, consecutiveLosses, dailyPnl };
+    }
+  }
+
+  return { paused: false, reason: null, consecutiveLosses, dailyPnl: Number(dailyPnl.toFixed(4)) };
+}
+
+/* ───────────── Adaptive Position Sizing (Kelly) ───────────── */
+
+function calcSizeMultiplier() {
+  if (!ADAPTIVE_SIZING) return 1.0;
+
+  const trades = loadTrades();
+  const closed = trades.filter((t) => t.status === "CLOSED");
+  if (closed.length < 5) return 1.0;
+
+  const sample  = closed.slice(-SIZING_LOOKBACK);
+  const wins    = sample.filter((t) => (t.pnl || 0) > 0);
+  const losses  = sample.filter((t) => (t.pnl || 0) <= 0);
+
+  const winRate = wins.length / sample.length;
+  const avgWin  = wins.length   ? wins.reduce((s, t) => s + t.pnl, 0) / wins.length : 0;
+  const avgLoss = losses.length ? Math.abs(losses.reduce((s, t) => s + t.pnl, 0) / losses.length) : 1;
+
+  const R     = avgLoss > 0 ? avgWin / avgLoss : 1;
+  const kelly = R > 0 ? winRate - (1 - winRate) / R : 0;
+  const clamped = Math.max(0, Math.min(1, kelly));
+
+  return Number((MIN_SIZE_MULT + clamped * (MAX_SIZE_MULT - MIN_SIZE_MULT)).toFixed(2));
+}
+
 /* ───────────── SL/TP Price Monitor ───────────── */
 
 async function monitorSLTP() {
@@ -199,37 +302,64 @@ async function monitorSLTP() {
       const info = await getSymbolInfo(trade.symbol);
       const absAmt = Math.abs(posAmt);
 
-      /* ── Break-even trailing ── */
       const profitPct = trade.action === "LONG"
         ? ((mark - trade.entryPrice) / trade.entryPrice) * 100
         : ((trade.entryPrice - mark) / trade.entryPrice) * 100;
 
       let currentSlPrice = trade.slPrice;
+      let needSave = false;
 
+      /* ── Break-even trailing ── */
       if (profitPct >= BREAKEVEN_TRIGGER && !trade.breakevenApplied) {
         const newSl = trade.action === "LONG"
           ? trade.entryPrice * (1 + BREAKEVEN_SECURE / 100)
           : trade.entryPrice * (1 - BREAKEVEN_SECURE / 100);
         currentSlPrice = Number(roundPrice(newSl, info.pricePrecision));
+        trade.slPrice = currentSlPrice;
+        trade.breakevenApplied = true;
+        needSave = true;
+        console.log(`BREAKEVEN: ${trade.action} ${trade.symbol} | SL -> ${currentSlPrice}`);
+      }
 
-        const fresh = loadTrades();
-        const ft = fresh.find((t) => t.id === trade.id);
-        if (ft && ft.status === "OPEN") {
-          ft.slPrice = currentSlPrice;
-          ft.breakevenApplied = true;
-          saveTrades(fresh);
-          console.log(`BREAKEVEN: ${trade.action} ${trade.symbol} | SL -> ${currentSlPrice}`);
+      /* ── Trailing Take Profit ── */
+      if (profitPct >= TRAIL_ACTIVATE_PCT) {
+        const hwm = trade.highWaterMark || trade.entryPrice;
+        const newHwm = trade.action === "LONG" ? Math.max(hwm, mark) : Math.min(hwm, mark);
+
+        if (newHwm !== hwm || !trade.trailingActive) {
+          const trailStop = trade.action === "LONG"
+            ? newHwm * (1 - TRAIL_DISTANCE_PCT / 100)
+            : newHwm * (1 + TRAIL_DISTANCE_PCT / 100);
+          trade.highWaterMark  = newHwm;
+          trade.trailStopPrice = Number(roundPrice(trailStop, info.pricePrecision));
+          trade.trailingActive = true;
+          needSave = true;
         }
       }
 
-      /* ── SL / TP check ── */
+      if (needSave) {
+        const fresh = loadTrades();
+        const ft = fresh.find((t) => t.id === trade.id);
+        if (ft && ft.status === "OPEN") {
+          ft.slPrice          = trade.slPrice;
+          ft.breakevenApplied = trade.breakevenApplied;
+          ft.trailingActive   = trade.trailingActive;
+          ft.highWaterMark    = trade.highWaterMark;
+          ft.trailStopPrice   = trade.trailStopPrice;
+          saveTrades(fresh);
+        }
+      }
+
+      /* ── SL / TP / TRAIL check ── */
       let hit = null;
 
       if (trade.action === "LONG") {
         if (currentSlPrice && mark <= currentSlPrice) hit = "SL";
+        else if (trade.trailStopPrice && trade.trailingActive && mark <= trade.trailStopPrice) hit = "TRAIL";
         else if (trade.tpPrice && mark >= trade.tpPrice) hit = "TP";
       } else {
         if (currentSlPrice && mark >= currentSlPrice) hit = "SL";
+        else if (trade.trailStopPrice && trade.trailingActive && mark >= trade.trailStopPrice) hit = "TRAIL";
         else if (trade.tpPrice && mark <= trade.tpPrice) hit = "TP";
       }
 
@@ -310,6 +440,7 @@ app.get("/api/stats", (_, res) => {
   const losses = closed.filter((t) => t.pnl <= 0);
   const slHits = closed.filter((t) => t.exitReason === "SL");
   const tpHits = closed.filter((t) => t.exitReason === "TP");
+  const trails = closed.filter((t) => t.exitReason === "TRAIL");
   const revs   = closed.filter((t) => t.exitReason === "REVERSE");
   const manuals = closed.filter((t) => t.exitReason === "MANUAL" || t.exitReason === "UNKNOWN");
 
@@ -328,6 +459,9 @@ app.get("/api/stats", (_, res) => {
     return { time: t.exitTime, pnl: Number(cumPnl.toFixed(4)) };
   });
 
+  const dd       = getDrawdownStatus();
+  const sizeMult = calcSizeMultiplier();
+
   res.json({
     totalTrades:   trades.length,
     openTrades:    open.length,
@@ -341,6 +475,7 @@ app.get("/api/stats", (_, res) => {
     maxLoss:       Number(maxLoss.toFixed(4)),
     slHits:        slHits.length,
     tpHits:        tpHits.length,
+    trailHits:     trails.length,
     reverseCloses: revs.length,
     manualCloses:  manuals.length,
     longCount:     longs.length,
@@ -349,6 +484,10 @@ app.get("/api/stats", (_, res) => {
     shortPnl:      Number(shortPnl.toFixed(4)),
     equityCurve,
     recentTrades:  [...trades].reverse().slice(0, 50),
+    drawdownGuard: dd,
+    sizeMult,
+    lastATR:       lastATR.value ? Number(lastATR.value.toFixed(2)) : null,
+    activeTrail:   open.length ? open.find((t) => t.trailingActive) || null : null,
   });
 });
 
@@ -386,6 +525,15 @@ app.post("/webhook", async (req, res) => {
 
     const info = await getSymbolInfo(symbol);
     await setLeverage(symbol, LEVERAGE);
+
+    /* ── Drawdown Guard (only blocks new entries, not closes) ── */
+    if (action === "LONG" || action === "SHORT") {
+      const dd = getDrawdownStatus();
+      if (dd.paused) {
+        console.log(`DRAWDOWN GUARD: sinyal reddedildi | ${dd.reason}`);
+        return res.json({ ok: true, ignored: true, reason: "drawdown_guard", detail: dd.reason });
+      }
+    }
 
     /* ── CLOSE actions ── */
     if (action === "CLOSE_LONG" || action === "CLOSE_SHORT") {
@@ -425,8 +573,12 @@ app.post("/webhook", async (req, res) => {
       }
     }
 
+    /* ── Adaptive position sizing ── */
+    const sizeMult = calcSizeMultiplier();
+    const effectiveQuote = QUOTE_PER_TRADE * sizeMult;
+
     const price  = Number(body.price) || (await getMarkPrice(symbol));
-    const rawQty = (QUOTE_PER_TRADE * LEVERAGE) / price;
+    const rawQty = (effectiveQuote * LEVERAGE) / price;
     const qty    = roundStep(rawQty, info.qtyStep);
 
     if (Number(qty) < info.minQty) {
@@ -444,18 +596,28 @@ app.post("/webhook", async (req, res) => {
                        || entryOrder.origQty || qty;
     const entryPrice = Number(entryOrder.avgPrice) || price;
 
+    /* ── SL/TP: ATR dynamic or webhook values or fixed % ── */
     let slPrice = Number(body.sl) || 0;
     let tpPrice = Number(body.tp) || 0;
+    let atrValue = 0;
+
+    if (USE_ATR && (!slPrice || !tpPrice)) {
+      atrValue = await getCachedATR(symbol);
+    }
 
     if (!slPrice) {
-      slPrice = action === "LONG"
-        ? price * (1 - SL_PERCENT / 100)
-        : price * (1 + SL_PERCENT / 100);
+      if (USE_ATR && atrValue > 0) {
+        slPrice = action === "LONG" ? price - atrValue * ATR_SL_MULT : price + atrValue * ATR_SL_MULT;
+      } else {
+        slPrice = action === "LONG" ? price * (1 - SL_PERCENT / 100) : price * (1 + SL_PERCENT / 100);
+      }
     }
     if (!tpPrice) {
-      tpPrice = action === "LONG"
-        ? price * (1 + TP_PERCENT / 100)
-        : price * (1 - TP_PERCENT / 100);
+      if (USE_ATR && atrValue > 0) {
+        tpPrice = action === "LONG" ? price + atrValue * ATR_TP_MULT : price - atrValue * ATR_TP_MULT;
+      } else {
+        tpPrice = action === "LONG" ? price * (1 + TP_PERCENT / 100) : price * (1 - TP_PERCENT / 100);
+      }
     }
 
     slPrice = roundPrice(slPrice, info.pricePrecision);
@@ -471,6 +633,11 @@ app.post("/webhook", async (req, res) => {
       slPrice:    Number(slPrice),
       tpPrice:    Number(tpPrice),
       breakevenApplied: false,
+      trailingActive:   false,
+      highWaterMark:    null,
+      trailStopPrice:   null,
+      atrValue:         atrValue || null,
+      sizeMult,
       exitPrice:  null,
       exitTime:   null,
       exitReason: null,
@@ -479,13 +646,15 @@ app.post("/webhook", async (req, res) => {
       status:     "OPEN",
     });
 
-    console.log(`TRADE LOGGED: ${action} ${symbol} @ ${entryPrice} | qty: ${filledQty} | SL: ${slPrice} | TP: ${tpPrice}`);
+    console.log(`TRADE LOGGED: ${action} ${symbol} @ ${entryPrice} | qty: ${filledQty} (x${sizeMult}) | SL: ${slPrice} | TP: ${tpPrice}${atrValue ? ` | ATR: ${atrValue.toFixed(2)}` : ""}`);
 
     return res.json({
       ok: true, action, symbol,
       entry: entryOrder,
-      sl: { price: slPrice, monitored: true },
-      tp: { price: tpPrice, monitored: true },
+      sl: { price: slPrice, monitored: true, atrBased: USE_ATR && atrValue > 0 },
+      tp: { price: tpPrice, monitored: true, atrBased: USE_ATR && atrValue > 0 },
+      sizeMult,
+      atr: atrValue || null,
     });
 
   } catch (err) {
@@ -499,7 +668,10 @@ app.post("/webhook", async (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`FUTURES BOT CALISIYOR -> PORT: ${PORT}`);
-  console.log(`Leverage: ${LEVERAGE}x | SL: ${SL_PERCENT}% | TP: ${TP_PERCENT}% | BE trigger: ${BREAKEVEN_TRIGGER}% -> secure: ${BREAKEVEN_SECURE}%`);
+  console.log(`Leverage: ${LEVERAGE}x | Quote: $${QUOTE_PER_TRADE}`);
+  console.log(`SL: ${USE_ATR ? `ATR(${ATR_PERIOD})x${ATR_SL_MULT}` : SL_PERCENT + "%"} | TP: ${USE_ATR ? `ATR(${ATR_PERIOD})x${ATR_TP_MULT}` : TP_PERCENT + "%"}`);
+  console.log(`Breakeven: ${BREAKEVEN_TRIGGER}% -> ${BREAKEVEN_SECURE}% | Trail: ${TRAIL_ACTIVATE_PCT}% act, ${TRAIL_DISTANCE_PCT}% dist`);
+  console.log(`Drawdown guard: ${MAX_CONSECUTIVE_LOSSES} consec / ${MAX_DAILY_LOSS_PCT}% daily | Sizing: ${ADAPTIVE_SIZING ? `Kelly (${MIN_SIZE_MULT}-${MAX_SIZE_MULT}x)` : "fixed"}`);
   console.log(`Dashboard: http://localhost:${PORT}/dashboard`);
   console.log(`Health:    http://localhost:${PORT}/health`);
 });

@@ -1,0 +1,73 @@
+//@version=5
+strategy("SCALP MVP BOT (Futures + SL/TP)", overlay=true, pyramiding=0, calc_on_every_tick=false, commission_type=strategy.commission.percent, commission_value=0.04, slippage=1)
+
+//====================
+// Inputs
+//====================
+groupSig  = "Signals"
+groupRisk = "Risk Management"
+groupExec = "Execution"
+
+emaFastLen   = input.int(9,  "EMA Fast",       group=groupSig)
+emaSlowLen   = input.int(21, "EMA Slow",       group=groupSig)
+rsiLen       = input.int(14, "RSI Len",        group=groupSig)
+rsiLongMin   = input.int(52, "RSI long min",   group=groupSig)
+rsiShortMax  = input.int(48, "RSI short max",  group=groupSig)
+
+slPercent    = input.float(1.0, "Stop Loss %",   minval=0.1, step=0.1, group=groupRisk)
+tpPercent    = input.float(1.5, "Take Profit %", minval=0.1, step=0.1, group=groupRisk)
+
+cooldownBars = input.int(3, "Cooldown bars", minval=0, group=groupExec)
+
+//====================
+// Indicators
+//====================
+emaFast = ta.ema(close, emaFastLen)
+emaSlow = ta.ema(close, emaSlowLen)
+vwapVal = ta.vwap(hlc3)
+rsiVal  = ta.rsi(close, rsiLen)
+
+//====================
+// Signals
+//====================
+longSignal  = ta.crossover(emaFast, emaSlow)  and close > vwapVal and rsiVal >= rsiLongMin
+shortSignal = ta.crossunder(emaFast, emaSlow) and close < vwapVal and rsiVal <= rsiShortMax
+
+//====================
+// Cooldown
+//====================
+var int lastSignalBar = na
+canSignal = na(lastSignalBar) or (bar_index - lastSignalBar >= cooldownBars)
+
+//====================
+// JSON Payload Builder
+//====================
+makePayload(_action, _sl, _tp) =>
+    sym = syminfo.basecurrency + "USDT"
+    '{"strategy":"scalp-mvp","symbol":"' + sym + '","action":"' + _action + '","price":' + str.tostring(close) + ',"sl":' + str.tostring(_sl) + ',"tp":' + str.tostring(_tp) + ',"time":' + str.tostring(time) + '}'
+
+//====================
+// Entries + SL/TP + Alerts
+//====================
+if barstate.isconfirmed and canSignal and longSignal
+    slPrice = close * (1 - slPercent / 100)
+    tpPrice = close * (1 + tpPercent / 100)
+    strategy.entry("L", strategy.long)
+    strategy.exit("L_Exit", "L", stop=slPrice, limit=tpPrice)
+    lastSignalBar := bar_index
+    alert(makePayload("LONG", slPrice, tpPrice), alert.freq_once_per_bar_close)
+
+if barstate.isconfirmed and canSignal and shortSignal
+    slPrice = close * (1 + slPercent / 100)
+    tpPrice = close * (1 - tpPercent / 100)
+    strategy.entry("S", strategy.short)
+    strategy.exit("S_Exit", "S", stop=slPrice, limit=tpPrice)
+    lastSignalBar := bar_index
+    alert(makePayload("SHORT", slPrice, tpPrice), alert.freq_once_per_bar_close)
+
+//====================
+// Plots
+//====================
+plot(emaFast, title="EMA Fast",  color=color.blue)
+plot(emaSlow, title="EMA Slow",  color=color.orange)
+plot(vwapVal, title="VWAP",      color=color.purple)

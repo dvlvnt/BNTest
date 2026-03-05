@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Scalp MVP Bot — Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg:       #0b0e17;
+    --card:     #131722;
+    --border:   #1e2333;
+    --text:     #d1d4dc;
+    --muted:    #787b86;
+    --green:    #26a69a;
+    --red:      #ef5350;
+    --blue:     #2196f3;
+    --orange:   #ff9800;
+    --purple:   #ab47bc;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    padding: 20px;
+    min-height: 100vh;
+  }
+  h1 {
+    font-size: 22px;
+    font-weight: 600;
+    margin-bottom: 6px;
+  }
+  .header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 24px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--border);
+  }
+  .header-right {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .live-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--green);
+    animation: pulse 2s infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.3; }
+  }
+  .subtitle { color: var(--muted); font-size: 13px; }
+
+  /* ── Stat Cards ── */
+  .cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 12px;
+    margin-bottom: 24px;
+  }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+  }
+  .card-label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--muted);
+    margin-bottom: 6px;
+  }
+  .card-value {
+    font-size: 24px;
+    font-weight: 700;
+  }
+  .card-sub {
+    font-size: 12px;
+    color: var(--muted);
+    margin-top: 4px;
+  }
+  .positive { color: var(--green); }
+  .negative { color: var(--red); }
+
+  /* ── Charts ── */
+  .charts-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    margin-bottom: 24px;
+  }
+  .chart-box {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+  }
+  .chart-box.wide { grid-column: 1 / -1; }
+  .chart-title {
+    font-size: 13px;
+    font-weight: 600;
+    margin-bottom: 12px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  canvas { max-height: 260px; }
+
+  /* ── Table ── */
+  .table-box {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+    overflow-x: auto;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+  }
+  th {
+    text-align: left;
+    padding: 8px 10px;
+    color: var(--muted);
+    font-weight: 500;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    border-bottom: 1px solid var(--border);
+  }
+  td {
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+  }
+  tr:last-child td { border-bottom: none; }
+  .badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 600;
+  }
+  .badge-long  { background: rgba(38,166,154,0.15); color: var(--green); }
+  .badge-short { background: rgba(239,83,80,0.15);  color: var(--red); }
+  .badge-open  { background: rgba(33,150,243,0.15); color: var(--blue); }
+  .badge-sl    { background: rgba(239,83,80,0.15);  color: var(--red); }
+  .badge-tp    { background: rgba(38,166,154,0.15); color: var(--green); }
+  .badge-rev   { background: rgba(255,152,0,0.15);  color: var(--orange); }
+  .badge-manual{ background: rgba(171,71,188,0.15); color: var(--purple); }
+
+  .no-data {
+    text-align: center;
+    color: var(--muted);
+    padding: 60px 20px;
+    font-size: 15px;
+  }
+
+  @media (max-width: 768px) {
+    .charts-grid { grid-template-columns: 1fr; }
+    .cards { grid-template-columns: repeat(2, 1fr); }
+  }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div>
+    <h1>Scalp MVP Bot</h1>
+    <div class="subtitle">Binance USDS-M Futures Testnet</div>
+  </div>
+  <div class="header-right">
+    <div class="live-dot"></div>
+    <span class="subtitle" id="lastUpdate">--</span>
+  </div>
+</div>
+
+<!-- Stat Cards -->
+<div class="cards">
+  <div class="card">
+    <div class="card-label">Toplam Islem</div>
+    <div class="card-value" id="totalTrades">0</div>
+    <div class="card-sub" id="openInfo">0 acik</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Kazanma Orani</div>
+    <div class="card-value" id="winRate">0%</div>
+    <div class="card-sub" id="winLossInfo">0W / 0L</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Toplam K/Z</div>
+    <div class="card-value" id="totalPnl">$0.00</div>
+    <div class="card-sub" id="avgPnlInfo">Ort: $0.00</div>
+  </div>
+  <div class="card">
+    <div class="card-label">En Iyi / En Kotu</div>
+    <div class="card-value" id="maxWin">$0.00</div>
+    <div class="card-sub" id="maxLoss">$0.00</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Long Performans</div>
+    <div class="card-value" id="longPnl">$0.00</div>
+    <div class="card-sub" id="longCount">0 islem</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Short Performans</div>
+    <div class="card-value" id="shortPnl">$0.00</div>
+    <div class="card-sub" id="shortCount">0 islem</div>
+  </div>
+</div>
+
+<!-- Charts -->
+<div class="charts-grid">
+  <div class="chart-box wide">
+    <div class="chart-title">Equity Curve (Kumulatif K/Z)</div>
+    <canvas id="equityChart"></canvas>
+  </div>
+  <div class="chart-box">
+    <div class="chart-title">Islem Bazinda K/Z</div>
+    <canvas id="pnlChart"></canvas>
+  </div>
+  <div class="chart-box">
+    <div class="chart-title">Cikis Nedeni Dagilimi</div>
+    <canvas id="exitChart"></canvas>
+  </div>
+</div>
+
+<!-- Trade History -->
+<div class="table-box">
+  <div class="chart-title" style="margin-bottom:12px">Son Islemler</div>
+  <div id="tableContent">
+    <div class="no-data">Henuz islem yok. Bot sinyal bekleniyor...</div>
+  </div>
+</div>
+
+<script>
+const chartDefaults = {
+  responsive: true,
+  maintainAspectRatio: false,
+  plugins: {
+    legend: { labels: { color: '#787b86', font: { size: 11 } } },
+  },
+  scales: {
+    x: { ticks: { color: '#787b86', font: { size: 10 } }, grid: { color: '#1e2333' } },
+    y: { ticks: { color: '#787b86', font: { size: 10 } }, grid: { color: '#1e2333' } },
+  },
+};
+
+let equityChart, pnlChart, exitChart;
+
+function initCharts() {
+  equityChart = new Chart(document.getElementById('equityChart'), {
+    type: 'line',
+    data: { labels: [], datasets: [{ label: 'Kumulatif K/Z (USDT)', data: [], borderColor: '#2196f3', backgroundColor: 'rgba(33,150,243,0.08)', fill: true, tension: 0.3, pointRadius: 3, borderWidth: 2 }] },
+    options: { ...chartDefaults, plugins: { ...chartDefaults.plugins, legend: { display: false } } },
+  });
+
+  pnlChart = new Chart(document.getElementById('pnlChart'), {
+    type: 'bar',
+    data: { labels: [], datasets: [{ label: 'K/Z (USDT)', data: [], backgroundColor: [] }] },
+    options: { ...chartDefaults, plugins: { ...chartDefaults.plugins, legend: { display: false } } },
+  });
+
+  exitChart = new Chart(document.getElementById('exitChart'), {
+    type: 'doughnut',
+    data: {
+      labels: ['Take Profit', 'Stop Loss', 'Ters Sinyal', 'Manuel'],
+      datasets: [{ data: [0, 0, 0, 0], backgroundColor: ['#26a69a', '#ef5350', '#ff9800', '#ab47bc'], borderWidth: 0 }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: { legend: { position: 'bottom', labels: { color: '#787b86', font: { size: 11 }, padding: 12 } } },
+    },
+  });
+}
+
+function pnlClass(val) { return val > 0 ? 'positive' : val < 0 ? 'negative' : ''; }
+function fmt(val) { return (val >= 0 ? '+' : '') + val.toFixed(4); }
+function fmtUsd(val) { return (val >= 0 ? '+$' : '-$') + Math.abs(val).toFixed(2); }
+
+function timeStr(ts) {
+  if (!ts) return '--';
+  const d = new Date(ts);
+  return d.toLocaleDateString('tr-TR', { day: '2-digit', month: '2-digit' }) + ' ' +
+         d.toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' });
+}
+
+function actionBadge(action) {
+  return action === 'LONG'
+    ? '<span class="badge badge-long">LONG</span>'
+    : '<span class="badge badge-short">SHORT</span>';
+}
+
+function exitBadge(reason) {
+  if (!reason) return '<span class="badge badge-open">ACIK</span>';
+  const map = { SL: 'badge-sl', TP: 'badge-tp', REVERSE: 'badge-rev', MANUAL: 'badge-manual', UNKNOWN: 'badge-manual' };
+  return `<span class="badge ${map[reason] || 'badge-manual'}">${reason}</span>`;
+}
+
+function updateDashboard(stats) {
+  document.getElementById('totalTrades').textContent = stats.totalTrades;
+  document.getElementById('openInfo').textContent = `${stats.openTrades} acik`;
+  document.getElementById('winRate').textContent = stats.winRate + '%';
+  document.getElementById('winLossInfo').textContent = `${stats.wins}W / ${stats.losses}L`;
+
+  const pnlEl = document.getElementById('totalPnl');
+  pnlEl.textContent = fmtUsd(stats.totalPnl);
+  pnlEl.className = 'card-value ' + pnlClass(stats.totalPnl);
+
+  document.getElementById('avgPnlInfo').textContent = `Ort: ${fmtUsd(stats.avgPnl)}`;
+
+  const maxWinEl = document.getElementById('maxWin');
+  maxWinEl.textContent = fmtUsd(stats.maxWin);
+  maxWinEl.className = 'card-value positive';
+  const maxLossEl = document.getElementById('maxLoss');
+  maxLossEl.textContent = fmtUsd(stats.maxLoss);
+  maxLossEl.className = 'card-sub negative';
+
+  const longPnlEl = document.getElementById('longPnl');
+  longPnlEl.textContent = fmtUsd(stats.longPnl);
+  longPnlEl.className = 'card-value ' + pnlClass(stats.longPnl);
+  document.getElementById('longCount').textContent = `${stats.longCount} islem`;
+
+  const shortPnlEl = document.getElementById('shortPnl');
+  shortPnlEl.textContent = fmtUsd(stats.shortPnl);
+  shortPnlEl.className = 'card-value ' + pnlClass(stats.shortPnl);
+  document.getElementById('shortCount').textContent = `${stats.shortCount} islem`;
+
+  // Equity curve
+  const eqLabels = stats.equityCurve.map((p) => timeStr(p.time));
+  const eqData   = stats.equityCurve.map((p) => p.pnl);
+  equityChart.data.labels = eqLabels;
+  equityChart.data.datasets[0].data = eqData;
+  equityChart.update('none');
+
+  // Per-trade PnL
+  const trades = stats.recentTrades.filter((t) => t.status === 'CLOSED').reverse();
+  pnlChart.data.labels = trades.map((_, i) => `#${i + 1}`);
+  pnlChart.data.datasets[0].data = trades.map((t) => t.pnl || 0);
+  pnlChart.data.datasets[0].backgroundColor = trades.map((t) =>
+    (t.pnl || 0) >= 0 ? '#26a69a' : '#ef5350'
+  );
+  pnlChart.update('none');
+
+  // Exit reasons
+  exitChart.data.datasets[0].data = [stats.tpHits, stats.slHits, stats.reverseCloses, stats.manualCloses];
+  exitChart.update('none');
+
+  // Table
+  const rt = stats.recentTrades;
+  if (rt.length === 0) {
+    document.getElementById('tableContent').innerHTML =
+      '<div class="no-data">Henuz islem yok. Bot sinyal bekliyor...</div>';
+    return;
+  }
+  let html = `<table><thead><tr>
+    <th>Tarih</th><th>Sembol</th><th>Yon</th><th>Giris</th>
+    <th>Cikis</th><th>SL</th><th>TP</th><th>Neden</th><th>K/Z</th><th>K/Z %</th>
+  </tr></thead><tbody>`;
+  for (const t of rt) {
+    const pnlVal = t.pnl != null ? fmt(t.pnl) : '--';
+    const pnlPct = t.pnlPercent != null ? (t.pnlPercent >= 0 ? '+' : '') + t.pnlPercent.toFixed(2) + '%' : '--';
+    html += `<tr>
+      <td>${timeStr(t.entryTime)}</td>
+      <td>${t.symbol}</td>
+      <td>${actionBadge(t.action)}</td>
+      <td>${t.entryPrice?.toFixed(2) || '--'}</td>
+      <td>${t.exitPrice?.toFixed(2) || '--'}</td>
+      <td>${t.slPrice?.toFixed(2) || '--'}</td>
+      <td>${t.tpPrice?.toFixed(2) || '--'}</td>
+      <td>${exitBadge(t.exitReason)}</td>
+      <td class="${pnlClass(t.pnl)}">${pnlVal}</td>
+      <td class="${pnlClass(t.pnlPercent)}">${pnlPct}</td>
+    </tr>`;
+  }
+  html += '</tbody></table>';
+  document.getElementById('tableContent').innerHTML = html;
+}
+
+async function fetchStats() {
+  try {
+    const resp = await fetch('/api/stats');
+    const data = await resp.json();
+    updateDashboard(data);
+    document.getElementById('lastUpdate').textContent =
+      'Son: ' + new Date().toLocaleTimeString('tr-TR');
+  } catch (err) {
+    console.error('Fetch error:', err);
+  }
+}
+
+initCharts();
+fetchStats();
+setInterval(fetchStats, 5000);
+</script>
+</body>
+</html>
